@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Faraday's Law 3D Simulation</title>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Three.js for 3D rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load OrbitControls for camera interaction -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        :root {
+            --primary-bg: #f8f8f8;
+            --secondary-bg: #ffffff;
+            --accent-color: #ef4444; /* Red */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: #d1d5db; /* Light gray background for the 'lab table' */
+        }
+        #webgl-canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 10;
+        }
+        #ui-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allows mouse interaction to pass through to the canvas */
+            z-index: 20;
+        }
+        .voltmeter-needle {
+            transition: transform 0.05s ease-out; /* Smooth needle movement */
+            transform-origin: 50% 100%;
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui-container">
+    <!-- Magnet Control Panel (New UI) -->
+    <div id="magnet-controls" class="absolute left-4 top-4 p-4 bg-gray-700 rounded-xl shadow-2xl pointer-events-auto flex flex-col items-center border-2 border-gray-600">
+        <h3 class="text-white text-lg font-bold mb-3">Magnet Control</h3>
+        <div class="flex space-x-4">
+            <button id="btn-left" class="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold rounded-lg shadow-md transition transform hover:scale-105 active:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                &larr; Move Left
+            </button>
+            <button id="btn-right" class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-semibold rounded-lg shadow-md transition transform hover:scale-105 active:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">
+                Move Right &rarr;
+            </button>
+        </div>
+    </div>
+
+    <!-- Voltmeter UI Panel -->
+    <div id="voltmeter" class="absolute right-4 top-4 p-4 md:p-6 bg-gray-700 rounded-xl shadow-2xl pointer-events-auto w-40 md:w-56 lg:w-64 border-2 border-gray-600">
+        <h2 class="text-white text-md md:text-xl font-bold mb-3 text-center tracking-wider">Induced Voltage</h2>
+
+        <!-- Analog Gauge Display -->
+        <div class="w-full h-auto bg-gray-800 p-2 rounded-lg relative overflow-hidden shadow-inner border border-gray-600">
+            <div class="relative w-full h-16 md:h-20 lg:h-24">
+                <!-- Gauge Arc -->
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <div class="w-full h-full rounded-full border-[10px] md:border-[12px] border-red-500 opacity-20" style="clip-path: polygon(0% 100%, 50% 0%, 100% 100%);"></div>
+                </div>
+
+                <!-- Needle Container - Positioned at the bottom center -->
+                <div id="needle-container" class="absolute w-1 h-full bottom-0 left-1/2 transform -translate-x-1/2" style="height: 100%; bottom: 0;">
+                    <svg class="w-full h-full" viewBox="0 0 100 100">
+                        <line id="needle" class="voltmeter-needle stroke-red-500" x1="50" y1="90" x2="50" y2="10" stroke-width="4" stroke-linecap="round" style="transform: rotate(0deg);"></line>
+                        <circle cx="50" cy="90" r="5" fill="#374151" stroke="#ef4444" stroke-width="1.5"></circle>
+                    </svg>
+                </div>
+
+                <!-- Voltage Labels -->
+                <div class="absolute w-full top-0 text-white flex justify-between px-2 text-xs md:text-sm font-mono">
+                    <span class="absolute left-1 bottom-1 text-red-500 font-bold">-MAX</span>
+                    <span class="absolute left-1/2 bottom-1 transform -translate-x-1/2 font-bold text-gray-400">0</span>
+                    <span class="absolute right-1 bottom-1 text-red-500 font-bold">+MAX</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Digital Display -->
+        <div class="mt-4 bg-gray-800 p-2 rounded-md border border-green-500">
+            <div class="text-green-400 text-3xl md:text-4xl font-mono text-center tracking-widest" id="digital-reading">0.00 V</div>
+        </div>
+
+         <!-- Instructions -->
+        <div class="mt-4 p-2 bg-gray-600 rounded-lg text-xs md:text-sm text-gray-200">
+            <p>Drag the magnet (red/blue bar) left and right to induce voltage.</p>
+            <p class="mt-1 text-yellow-300">Voltage is induced only when the magnet is *moving*!</p>
+            <p class="mt-1 text-blue-300">Use mouse/touch to rotate, zoom, and pan the view.</p>
+        </div>
+    </div>
+</div>
+
+<canvas id="webgl-canvas"></canvas>
+
+<script type="module">
+    // --- Configuration Constants ---
+    const MAX_VOLTAGE = 50.0;
+    const MAX_RANGE = 25; // Max distance magnet can travel from center (units)
+    const COIL_LENGTH = 30;
+    const COIL_RADIUS = 5;
+    const WIRE_SEGMENTS = 200;
+    const BUTTON_DISPLACEMENT = 5; // Distance the magnet moves per button click
+
+    // --- Three.js Setup ---
+    let scene, camera, renderer, clock, lastFrameTime = 0;
+    let magnet, magnetMeshN, magnetMeshS;
+    let controls; 
+    let isDragging = false;
+    let dragStartPos = new THREE.Vector3();
+    let dragOffset = new THREE.Vector3();
+    let currentMagnetX = 0;
+    let velocityX = 0;
+
+    // DOM elements
+    const needle = document.getElementById('needle');
+    const digitalReading = document.getElementById('digital-reading');
+
+    function init() {
+        // 1. Scene Setup
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xecf0f1); // Light grey/white lab background
+
+        // 2. Camera Setup
+        const aspectRatio = window.innerWidth / window.innerHeight;
+        camera = new THREE.PerspectiveCamera(50, aspectRatio, 0.1, 1000);
+        camera.position.set(-15, 10, 40);
+        camera.lookAt(0, 0, 0);
+
+        // 3. Renderer Setup
+        renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('webgl-canvas'), antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        // 4. Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        directionalLight.position.set(20, 30, 40);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 100;
+        directionalLight.shadow.camera.left = -50;
+        directionalLight.shadow.camera.right = 50;
+        directionalLight.shadow.camera.top = 50;
+        directionalLight.shadow.camera.bottom = -50;
+        scene.add(directionalLight);
+
+        // 5. Create Objects
+        createLabTable();
+        createSolenoid();
+        createMagnet();
+        createWires();
+        
+        // 6. Camera Controls
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; // smooth camera movement
+        controls.dampingFactor = 0.05;
+        controls.screenSpacePanning = false; 
+        controls.minDistance = 20;
+        controls.maxDistance = 100;
+
+
+        // 7. Clock for timing
+        clock = new THREE.Clock();
+
+        // 8. Event Listeners
+        window.addEventListener('resize', onWindowResize, false);
+        setupInteraction();
+
+        // New: Button Controls Setup
+        document.getElementById('btn-left').addEventListener('click', () => moveMagnet(-BUTTON_DISPLACEMENT));
+        document.getElementById('btn-right').addEventListener('click', () => moveMagnet(BUTTON_DISPLACEMENT));
+
+        // Start the animation loop
+        animate();
+    }
+
+    // --- Geometry Creation Functions ---
+
+    function createLabTable() {
+        // Table Top (large flat plane)
+        const tableGeometry = new THREE.BoxGeometry(100, 2, 60);
+        const tableMaterial = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.1, roughness: 0.8 });
+        const table = new THREE.Mesh(tableGeometry, tableMaterial);
+        table.position.y = -2;
+        table.receiveShadow = true;
+        scene.add(table);
+    }
+
+    function createSolenoid() {
+        // Central Tube/Bore
+        const tubeGeometry = new THREE.CylinderGeometry(2, 2, 50, 32);
+        const tubeMaterial = new THREE.MeshPhysicalMaterial({
+            color: 0xffffff,
+            transparent: true,
+            opacity: 0.2,
+            roughness: 0.2,
+            metalness: 0.0
+        });
+        const tube = new THREE.Mesh(tubeGeometry, tubeMaterial);
+        tube.rotation.z = Math.PI / 2; // Rotate to lie along the X-axis
+        scene.add(tube);
+
+        // Solenoid Coil (Simulated windings)
+        const coilMaterial = new THREE.MeshStandardMaterial({ color: 0xcd7f32, metalness: 0.7, roughness: 0.3 }); // Copper color
+        const coilSegments = 120; // Number of "wires" to simulate
+        const pitch = COIL_LENGTH / coilSegments;
+
+        for (let i = 0; i < coilSegments; i++) {
+            const xPos = i * pitch - (COIL_LENGTH / 2);
+            // Ring geometry for each winding
+            const ringGeometry = new THREE.TorusGeometry(COIL_RADIUS, 0.25, 6, 32);
+            const ring = new THREE.Mesh(ringGeometry, coilMaterial);
+
+            ring.position.x = xPos;
+            ring.rotation.y = Math.PI / 2; // Rotate to face along Y/Z
+            ring.rotation.x = Math.PI / 2; // Rotate to align with X-axis
+
+            // Scale to prevent gaps from torus
+            ring.scale.set(1.02, 1.02, 1.02);
+            scene.add(ring);
+        }
+    }
+
+    function createMagnet() {
+        const magnetLength = 10;
+        const magnetWidth = 3;
+        const magnetHeight = 3;
+
+        // Magnet group to hold the two halves and the hitbox
+        magnet = new THREE.Group();
+
+        // North Pole (Red)
+        const nGeometry = new THREE.BoxGeometry(magnetLength / 2, magnetHeight, magnetWidth);
+        const nMaterial = new THREE.MeshStandardMaterial({ color: 0xea4545, metalness: 0.3, roughness: 0.5 });
+        magnetMeshN = new THREE.Mesh(nGeometry, nMaterial);
+        magnetMeshN.position.x = -magnetLength / 4; // Shift left
+        magnetMeshN.castShadow = true;
+        magnet.add(magnetMeshN);
+
+        // South Pole (Blue)
+        const sGeometry = new THREE.BoxGeometry(magnetLength / 2, magnetHeight, magnetWidth);
+        const sMaterial = new THREE.MeshStandardMaterial({ color: 0x3b82f6, metalness: 0.3, roughness: 0.5 });
+        magnetMeshS = new THREE.Mesh(sGeometry, sMaterial);
+        magnetMeshS.position.x = magnetLength / 4; // Shift right
+        magnetMeshS.castShadow = true;
+        magnet.add(magnetMeshS);
+
+        // Invisible Hitbox for easier targeting
+        const hitboxGeometry = new THREE.BoxGeometry(magnetLength * 2, magnetHeight * 2, magnetWidth * 2); // Larger area
+        const hitboxMaterial = new THREE.MeshBasicMaterial({ 
+            color: 0x00ff00, 
+            transparent: true, 
+            opacity: 0, // Fully invisible
+            depthTest: false 
+        }); 
+        const magnetHitbox = new THREE.Mesh(hitboxGeometry, hitboxMaterial);
+        magnetHitbox.position.set(0, 0, 0); 
+        magnet.add(magnetHitbox);
+
+        // Set initial position outside the coil to the left
+        currentMagnetX = -MAX_RANGE; 
+        magnet.position.y = 0;
+        magnet.position.z = 0; 
+        magnet.position.x = currentMagnetX;
+        scene.add(magnet);
+    }
+
+    function createWires() {
+        const wireMaterial = new THREE.MeshStandardMaterial({ color: 0x8d6e63, metalness: 0.5, roughness: 0.5 }); // Brownish wire insulation
+
+        // Path for the wires (simplified curve from coil edge to a point near the voltmeter)
+        const startPoint = new THREE.Vector3(-COIL_LENGTH / 2 - 0.5, -COIL_RADIUS, 0);
+        const controlPoint = new THREE.Vector3(-20, -5, 25);
+        const endPoint = new THREE.Vector3(-20, -1, 35); // End near the voltmeter area
+
+        const curve = new THREE.QuadraticBezierCurve3(startPoint, controlPoint, endPoint);
+
+        // Wire 1 (Red/Positive)
+        const geometry1 = new THREE.TubeGeometry(curve, 64, 0.15, 8, false);
+        const wire1 = new THREE.Mesh(geometry1, new THREE.MeshStandardMaterial({ color: 0xef4444 })); // Red
+        scene.add(wire1);
+
+        // Wire 2 (Black/Negative)
+        const startPoint2 = new THREE.Vector3(COIL_LENGTH / 2 + 0.5, -COIL_RADIUS, 0);
+        const controlPoint2 = new THREE.Vector3(20, -5, 25);
+        const endPoint2 = new THREE.Vector3(20, -1, 35);
+
+        const curve2 = new THREE.QuadraticBezierCurve3(startPoint2, controlPoint2, endPoint2);
+        const geometry2 = new THREE.TubeGeometry(curve2, 64, 0.15, 8, false);
+        const wire2 = new THREE.Mesh(geometry2, new THREE.MeshStandardMaterial({ color: 0x1f2937 })); // Dark Grey/Black
+        scene.add(wire2);
+    }
+
+    // --- Interaction Logic ---
+
+    // Function to handle discrete button movement
+    function moveMagnet(displacement) {
+        if (isDragging) return; // Don't move via buttons if user is dragging
+
+        const newX = currentMagnetX + displacement;
+        const clampedX = Math.max(-MAX_RANGE, Math.min(MAX_RANGE, newX));
+        
+        // Calculate a momentary velocity based on the displacement change
+        // This is necessary to trigger the voltage calculation in the next frame
+        // Assuming a fast (0.05s) change for instant feedback
+        velocityX = (clampedX - currentMagnetX) / 0.05; 
+
+        currentMagnetX = clampedX;
+        magnet.position.x = currentMagnetX;
+        // Decay logic in animate() will slow it down
+    }
+
+    function setupInteraction() {
+        // Use a raycaster for detecting mouse interaction with the magnet
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        // Interaction plane remains in the X-Y plane (Z=0)
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); 
+
+        // Helper to update mouse NDC coordinates
+        function updateMouseCoordinates(event) {
+            let clientX, clientY;
+            if (event.touches) {
+                clientX = event.touches[0].clientX;
+                clientY = event.touches[0].clientY;
+            } else {
+                clientX = event.clientX;
+                clientY = event.clientY;
+            }
+
+            mouse.x = (clientX / window.innerWidth) * 2 - 1;
+            mouse.y = - (clientY / window.innerHeight) * 2 + 1;
+        }
+
+        // Function to find intersection with the X-Z interaction plane
+        function intersectPlane() {
+            const intersection = new THREE.Vector3();
+            raycaster.ray.intersectPlane(plane, intersection);
+            return intersection;
+        }
+
+        function onPointerDown(event) {
+            event.preventDefault();
+
+            // 1. Update mouse position based on click
+            updateMouseCoordinates(event); 
+
+            // 2. Setup raycaster based on updated mouse position
+            raycaster.setFromCamera(mouse, camera);
+            
+            // 3. Check for intersection with magnet objects (includes the large invisible hitbox)
+            const intersects = raycaster.intersectObjects(magnet.children, true); 
+
+            if (intersects.length > 0) {
+                isDragging = true;
+                // CRUCIAL FIX: Stop event propagation to prevent OrbitControls from handling the drag
+                event.stopPropagation(); 
+                controls.enabled = false; 
+                renderer.domElement.style.cursor = 'grabbing';
+                
+                // Get the starting 3D position on the interaction plane
+                dragStartPos.copy(intersectPlane()); 
+                
+                dragOffset.copy(dragStartPos).sub(magnet.position);
+                dragOffset.y = 0; // Lock to X-axis
+                dragOffset.z = 0; // Lock to X-axis
+            }
+        }
+
+        function onPointerMove(event) {
+            if (!isDragging) return;
+
+            event.preventDefault();
+            
+            // 1. Update mouse position
+            updateMouseCoordinates(event);
+            
+            // 2. Setup raycaster 
+            raycaster.setFromCamera(mouse, camera);
+
+            // 3. Find intersection on the plane
+            const intersection = intersectPlane();
+            let newX = intersection.x - dragOffset.x;
+
+            // Constrain movement within the defined range
+            newX = Math.max(-MAX_RANGE, Math.min(MAX_RANGE, newX));
+
+            // Calculate velocity (change in position over time)
+            const deltaTime = clock.getDelta();
+            if (deltaTime > 0) {
+                // Use a non-zero velocity only when actively dragging
+                velocityX = (newX - currentMagnetX) / deltaTime; 
+            }
+
+            currentMagnetX = newX;
+            magnet.position.x = currentMagnetX;
+        }
+
+        function onPointerUp(event) {
+            if (isDragging) {
+                isDragging = false;
+                // Re-enable controls after releasing the magnet
+                controls.enabled = true; 
+                renderer.domElement.style.cursor = 'grab';
+            }
+        }
+
+        renderer.domElement.addEventListener('mousedown', onPointerDown, false);
+        document.addEventListener('mousemove', onPointerMove, false);
+        document.addEventListener('mouseup', onPointerUp, false);
+
+        // Touch events for mobile
+        renderer.domElement.addEventListener('touchstart', onPointerDown, false);
+        document.addEventListener('touchmove', onPointerMove, false);
+        document.addEventListener('touchend', onPointerUp, false);
+
+        // Set initial cursor style
+        renderer.domElement.style.cursor = 'grab';
+    }
+
+    // --- Simulation and Rendering Loop ---
+
+    function calculateInducedVoltage(xPos, velocity, deltaTime) {
+        // 1. Decouple velocity when not dragging (simple decay)
+        if (!isDragging) {
+            // Apply air resistance/friction decay to velocity
+            velocityX *= 0.95; // Decay factor (needs to be tuned based on deltaTime, but 0.95 is okay for visual decay)
+        }
+
+        // 2. Proximity factor (Flux density is highest near the center (x=0))
+        // Use a bell curve/Gaussian decay for the flux change rate
+        // f(x) = e^-(x/sigma)^2
+        const sigma = 15; // Defines the width of the strongest magnetic field zone
+        const proximityFactor = Math.exp(-Math.pow(xPos / sigma, 2));
+
+        // 3. Induced EMF (Voltage) is proportional to Flux Change Rate: V ~ d(Phi)/dt ~ velocity * proximity_factor
+        const K_SCALE = 0.5; // Constant to scale the physical effect to MAX_VOLTAGE
+        let inducedV = K_SCALE * velocity * proximityFactor;
+
+        // Clamp the voltage to the defined maximum display range
+        inducedV = Math.max(-MAX_VOLTAGE, Math.min(MAX_VOLTAGE, inducedV));
+
+        return inducedV;
+    }
+
+    function updateVoltmeter(voltage) {
+        // Map the voltage (-MAX_VOLTAGE to +MAX_VOLTAGE) to a needle rotation angle
+        // Range: -90 degrees (CCW) to +90 degrees (CW)
+        const minAngle = -90;
+        const maxAngle = 90;
+
+        // Normalize voltage to a -1 to +1 range
+        const normalizedV = voltage / MAX_VOLTAGE;
+
+        // Map normalizedV to angle
+        const angle = normalizedV * maxAngle;
+
+        // Update the analog needle
+        needle.style.transform = `rotate(${angle}deg)`;
+
+        // Update the digital display
+        const displayV = voltage.toFixed(2);
+        digitalReading.textContent = `${displayV} V`;
+
+        // Optional: Change color based on polarity
+        if (voltage > 0.5) {
+            digitalReading.classList.remove('text-green-400', 'text-blue-400');
+            digitalReading.classList.add('text-red-400');
+        } else if (voltage < -0.5) {
+            digitalReading.classList.remove('text-green-400', 'text-red-400');
+            digitalReading.classList.add('text-blue-400');
+        } else {
+            digitalReading.classList.remove('text-red-400', 'text-blue-400');
+            digitalReading.classList.add('text-green-400');
+        }
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+
+        const deltaTime = clock.getDelta();
+
+        // 1. Simulation Step: Calculate induced voltage
+        const inducedVoltage = calculateInducedVoltage(currentMagnetX, velocityX, deltaTime);
+
+        // 2. Update 3D Model (if not dragging, apply velocity decay to position)
+        if (!isDragging) {
+            currentMagnetX += velocityX * deltaTime;
+            currentMagnetX = Math.max(-MAX_RANGE, Math.min(MAX_RANGE, currentMagnetX)); // Re-clamp
+            magnet.position.x = currentMagnetX;
+
+            // Stop movement if velocity is negligible (to prevent jitter)
+            if (Math.abs(velocityX) < 0.05) {
+                velocityX = 0;
+            }
+        }
+
+        // Update camera controls
+        controls.update();
+
+        // 3. Update Voltmeter UI
+        updateVoltmeter(inducedVoltage);
+
+        // 4. Render the scene
+        renderer.render(scene, camera);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // Initialize the application when the window loads
+    window.onload = init;
+
+</script>
+</body>
+</html>
